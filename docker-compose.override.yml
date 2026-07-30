@@ -1,0 +1,6 @@
+version: '3.8'
+services:
+  web:
+    environment:
+      - APACHE_DOCUMENT_ROOT=/var/www/html/api
+    command: ["docker-php-entrypoint", "apache2-foreground"]
