@@ -16,17 +16,63 @@ docker compose up --build
 2) Prepare GitHub repository
 - Push your code to a GitHub repo and ensure the `Dockerfile` and `.github/workflows/deploy-container.yml` are in the repository root.
 
-3) Secrets to set in GitHub repository
-- `GITHUB_TOKEN` — GitHub Actions token (automatically available, no extra secret needed for registry login)
+3) Supabase & Render (recommended setup)
 
-Optional (choose one provider)
-- For Render:
-  - `RENDER_SERVICE_ID` — Render service id
-  - `RENDER_API_KEY` — Render API key
+- Supabase (Postgres)
+  - Create a project on Supabase and open the SQL Editor.
+  - Run the SQL in `sql/supabase_schema.sql` (or the SQL shown below) to create `usuarios` and `pedidos` tables.
+  - From Project → Settings → Database → Connection string, copy host, port, database name, user and password.
 
-- For Fly.io:
-  - `FLY_ORG` — Fly organization (optional)
-  - `FLY_API_TOKEN` — Fly API token
+- Render (backend container)
+  - We'll deploy the built image from `ghcr.io/<your-github-username>/supraserver-api:latest`.
+  - In Render, create a new Web Service → Select "Private Docker Registries" → Enter the GHCR image URL and choose the branch to auto-deploy (main).
+  - In the Render service settings, set Environment → Add Environment Variables using these names:
+    - `DB_HOST` — Supabase DB host
+    - `DB_PORT` — 5432
+    - `DB_NAME` — database name
+    - `DB_USER` — database user
+    - `DB_PASSWORD` — database password
+  - Optionally configure health checks and scale settings. Deploy.
+
+Notes on GHCR
+- The workflow builds and pushes the image to GHCR at `ghcr.io/${{ github.repository_owner }}/supraserver-api:latest`. You do not need additional registry secrets; Actions uses `GITHUB_TOKEN` for authentication.
+
+4) Deploy flow (Supabase + Render)
+- Push to `main` → Actions builds image and publishes to GHCR.
+- On Render, configure a Web Service to pull the GHCR image above, add `DB_*` env vars and deploy.
+- After deploy, retrieve the public IP or hostname for the Render service and add it to the provider panel (gsm-imei.com → Profile → API Access).
+
+5) SQL to create tables (run in Supabase SQL Editor)
+```sql
+CREATE TABLE IF NOT EXISTS usuarios (
+    id serial PRIMARY KEY,
+    usuario text NOT NULL UNIQUE,
+    senha text NOT NULL,
+    saldo_cliente numeric(15,2) NOT NULL DEFAULT 0.00,
+    criado_em timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS pedidos (
+    id serial PRIMARY KEY,
+    usuario_id integer NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+    imei text,
+    servico_id text NOT NULL,
+    referencia text,
+    status text NOT NULL,
+    resposta_api jsonb NOT NULL,
+    data_pedido timestamptz NOT NULL DEFAULT now()
+);
+```
+
+6) Local quick test
+- Use `docker compose up --build` to run locally and test `http://localhost:8080`.
+
+7) After IP authorization
+- Reopen `tools/debug_api.php` on the deployed host to verify Dhru Fusion API access.
+
+Security note
+- Never commit production secrets. Use Render's Environment settings (or GitHub Secrets for CI) to store credentials.
+
 
 4) Deploy flow
 - On push to `main` or `master`, GitHub Actions builds the image and pushes it to Docker Hub. If Render or Fly secrets are set, subsequent deploy steps run.

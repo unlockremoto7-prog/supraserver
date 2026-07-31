@@ -191,7 +191,7 @@ try {
     $update = $pdo->prepare('UPDATE usuarios SET saldo_cliente = ? WHERE id = ?');
     $update->execute([$novoSaldo, $userId]);
 
-    $insert = $pdo->prepare('INSERT INTO pedidos (usuario_id, imei, servico_id, referencia, status, resposta_api, data_pedido) VALUES (?, ?, ?, ?, ?, ?, NOW())');
+    $insert = $pdo->prepare('INSERT INTO pedidos (usuario_id, imei, servico_id, referencia, status, resposta_api, data_pedido) VALUES (?, ?, ?, ?, ?, ?, NOW()) RETURNING id');
     $insert->execute([
         $userId,
         $imei,
@@ -201,7 +201,7 @@ try {
         json_encode($response, JSON_UNESCAPED_UNICODE),
     ]);
 
-    $pedidoId = $pdo->lastInsertId();
+    $pedidoId = $insert->fetchColumn();
     $pdo->commit();
 } catch (Exception $e) {
     $pdo->rollBack();
