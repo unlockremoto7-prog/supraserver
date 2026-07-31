@@ -11,9 +11,14 @@ $pass = getenv('DB_PASSWORD');
 $sslmode = getenv('DB_SSLMODE') ?: 'require';
 $databaseUrl = getenv('DATABASE_URL') ?: getenv('DB_URL');
 
-if (!$host || !$db || !$user || !$pass) {
-    if ($databaseUrl) {
-        $parsed = parse_url($databaseUrl);
+if ($databaseUrl) {
+    $parsed = parse_url($databaseUrl);
+    $query = [];
+    parse_str($parsed['query'] ?? '', $query);
+
+    $sslmode = $query['sslmode'] ?? $sslmode;
+
+    if (!$host || !$db || !$user || !$pass) {
         $host = $parsed['host'] ?? null;
         $port = $parsed['port'] ?? '5432';
         $db = ltrim($parsed['path'] ?? '', '/');
@@ -34,7 +39,20 @@ if (!extension_loaded('pdo_pgsql')) {
     exit;
 }
 
-$dsn = "pgsql:host=$host;port=$port;dbname=$db;sslmode=$sslmode";
+$resolvedHost = $host;
+if (!empty($host) && !filter_var($host, FILTER_VALIDATE_IP)) {
+    $ipv4s = gethostbynamel($host);
+    if (is_array($ipv4s) && count($ipv4s) > 0) {
+        $resolvedHost = $ipv4s[0];
+    } else {
+        $resolved = gethostbyname($host);
+        if ($resolved !== $host && filter_var($resolved, FILTER_VALIDATE_IP)) {
+            $resolvedHost = $resolved;
+        }
+    }
+}
+
+$dsn = "pgsql:host=$resolvedHost;port=$port;dbname=$db;sslmode=$sslmode";
 $options = [
     PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
