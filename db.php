@@ -36,7 +36,7 @@ if (!extension_loaded('pdo_pgsql')) {
 
 $dsn = "pgsql:host=$host;port=$port;dbname=$db;sslmode=$sslmode";
 $options = [
-    PDO::ATTR_ERRMODE            => PDO::ATTR_ERRMODE_EXCEPTION,
+    PDO::ATTR_ERRMODE            => PDO::ERRMODE_EXCEPTION,
     PDO::ATTR_DEFAULT_FETCH_MODE => PDO::FETCH_ASSOC,
 ];
 
