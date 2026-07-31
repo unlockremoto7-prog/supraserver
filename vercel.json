@@ -7,10 +7,6 @@
   "cleanUrls": true,
   "rewrites": [
     {
-      "source": "/(.*\\.(css|js|png|jpg|jpeg|gif|svg|ico|webp|txt|json|map|woff|woff2|ttf|eot))",
-      "destination": "/$1"
-    },
-    {
       "source": "/(.*)",
       "destination": "/api/index.php"
     }
@@ -27,3 +23,4 @@
     }
   ]
 }
+
