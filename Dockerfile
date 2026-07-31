@@ -1,23 +1,13 @@
 FROM php:8.2-apache
 
-# Install system deps and PHP extensions commonly required by the project
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
-       libzip-dev libpng-dev libjpeg-dev libfreetype6-dev libonig-dev libxml2-dev zlib1g-dev git unzip curl \
-    && docker-php-ext-install pdo pdo_mysql mysqli mbstring zip exif bcmath sockets pcntl \
-    && docker-php-ext-configure gd --with-jpeg --with-freetype \
-    && docker-php-ext-install gd \
-    && a2enmod rewrite \
-    && rm -rf /var/lib/apt/lists/*
+# Instala as extensões PDO do PostgreSQL que o seu db.php precisa
+RUN apt-get update && apt-get install -y libpq-dev \
+    && docker-php-ext-install pdo pdo_pgsql pgsql
 
-# Copy application
-WORKDIR /var/www/html
-COPY . /var/www/html
+# Copia os arquivos do seu site para a pasta do servidor
+COPY . /var/www/html/
 
-RUN chown -R www-data:www-data /var/www/html \
-    && find /var/www/html -type d -exec chmod 755 {} \; \
-    && find /var/www/html -type f -exec chmod 644 {} \;
+# Ativa o módulo de reescrita de URL do Apache
+RUN a2enmod rewrite
 
 EXPOSE 80
-
-CMD ["apache2-foreground"]
