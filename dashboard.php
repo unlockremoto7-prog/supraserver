@@ -1,7 +1,11 @@
-<?php
+﻿<?php
 error_reporting(E_ALL);
 ini_set('display_errors', '1');
 ini_set('display_startup_errors', '1');
+
+global $cotacao_dolar, $margem_lucro;
+$cotacao_dolar = 5.50;
+$margem_lucro = 1.30;
 
 session_start();
 
@@ -29,77 +33,145 @@ $lastLoginTime = $_SESSION['last_login_time'] ?? date('d/m/Y H:i:s');
 $lastLoginIp = $_SESSION['last_login_ip'] ?? ($_SERVER['REMOTE_ADDR'] ?? 'IP desconhecido');
 $userEmail = $_SESSION['user_email'] ?? 'não definido';
 
-$api = dhruFusionClient();
-$imei_services = $api->action('imeiservicelist');
-$server_services = $api->action('serverloginservicelist');
-$remote_services = $api->action('remoteservicelist');
+$currentTab = $_GET['tab'] ?? 'imei';
 
-// Temporary debug helper: show raw API responses when ?debug_api=1 is present
+$cotacao_dolar = 5.50;
+$margem_lucro = 1.30;
+
+$api = dhruFusionClient();
+$imei_raw   = $api->action('imeiservicelist');
+$server_raw = $api->action('serverloginservicelist');
+$remote_raw = $api->action('remoteservicelist');
+
+$imei_groups   = normalize_dhru_response($imei_raw);
+$server_groups = normalize_dhru_response($server_raw);
+$remote_groups = normalize_dhru_response($remote_raw);
+
+$imei_groups   = is_array($imei_groups) ? $imei_groups : [];
+$server_groups = is_array($server_groups) ? $server_groups : [];
+$remote_groups = is_array($remote_groups) ? $remote_groups : [];
+
+mark_groups_origin($imei_groups, 'imei');
+mark_groups_origin($server_groups, 'server');
+mark_groups_origin($remote_groups, 'remote');
+
+$allGroups = array_values(array_merge($imei_groups, $server_groups, $remote_groups));
+
 if (isset($_GET['debug_api']) && $_GET['debug_api'] === '1') {
     echo '<h2 style="color:#fff;">DEBUG API RAW RESPONSES</h2>';
     echo '<pre style="color:#ddd; background:#071018; padding:1rem; border-radius:6px;">';
-    echo "-- IMEISERVICELIST --\n" . htmlspecialchars(var_export($imei_services, true), ENT_QUOTES, 'UTF-8') . "\n\n";
-    echo "-- SERVERLOGINSERVICELIST --\n" . htmlspecialchars(var_export($server_services, true), ENT_QUOTES, 'UTF-8') . "\n\n";
-    echo "-- REMOTESERVICELIST --\n" . htmlspecialchars(var_export($remote_services, true), ENT_QUOTES, 'UTF-8') . "\n";
+    echo "-- IMEISERVICELIST --\n" . htmlspecialchars(var_export($imei_raw, true), ENT_QUOTES, 'UTF-8') . "\n\n";
+    echo "-- SERVERLOGINSERVICELIST --\n" . htmlspecialchars(var_export($server_raw, true), ENT_QUOTES, 'UTF-8') . "\n\n";
+    echo "-- REMOTESERVICELIST --\n" . htmlspecialchars(var_export($remote_raw, true), ENT_QUOTES, 'UTF-8') . "\n";
     echo '</pre>';
 
-    // Also persist a copy to logs/api_debug.log for inspection
     $logDir = __DIR__ . '/logs';
     if (!is_dir($logDir)) {
         @mkdir($logDir, 0755, true);
     }
-    @file_put_contents($logDir . '/api_debug.log', date('c') . "\n-- IMEI --\n" . var_export($imei_services, true) . "\n-- SERVER --\n" . var_export($server_services, true) . "\n-- REMOTE --\n" . var_export($remote_services, true) . "\n\n", FILE_APPEND);
+    @file_put_contents($logDir . '/api_debug.log', date('c') . "\n-- IMEI --\n" . var_export($imei_raw, true) . "\n-- SERVER --\n" . var_export($server_raw, true) . "\n-- REMOTE --\n" . var_export($remote_raw, true) . "\n\n", FILE_APPEND);
 }
 
-function normalize_dhru_service_response($response, $actionName)
+function mark_groups_origin(array &$groups, string $origin): void
+{
+    foreach ($groups as &$group) {
+        if (!is_array($group)) {
+            continue;
+        }
+
+        $group['ORIGEM_ABA'] = $origin;
+
+        foreach ($group as $key => $value) {
+            if (!is_array($value)) {
+                continue;
+            }
+
+            if (
+                isset($value['SERVICEID']) || isset($value['serviceid']) || isset($value['ID']) || isset($value['id'])
+                || isset($value['SERVICENAME']) || isset($value['servicename']) || isset($value['SERVICE_NAME']) || isset($value['name'])
+            ) {
+                $group[$key]['ORIGEM_ABA'] = $origin;
+                continue;
+            }
+
+            if (array_is_list($value)) {
+                mark_groups_origin($value, $origin);
+            }
+        }
+    }
+    unset($group);
+}
+
+function normalize_dhru_response($response)
 {
     if ($response === false || !is_array($response)) {
-        echo '<!-- API DEBUG (' . htmlspecialchars($actionName, ENT_QUOTES, 'UTF-8') . '): response failed or is not an array -->';
-        if ($response !== false) {
-            echo '<!-- ' . htmlspecialchars(var_export($response, true), ENT_QUOTES, 'UTF-8') . ' -->';
-        }
         return [];
     }
 
-    $serviceGroups = [];
-    $candidate = $response;
-
-    if (isset($response['SUCCESS'])) {
-        $candidate = $response['SUCCESS'];
-        if (isset($candidate[0]) && is_array($candidate[0])) {
-            $candidate = $candidate[0];
+    $looksLikeService = static function ($item): bool {
+        if (!is_array($item)) {
+            return false;
         }
-    }
 
-    if (isset($candidate['LIST']) && is_array($candidate['LIST'])) {
-        $serviceGroups = $candidate['LIST'];
-    } elseif (isset($candidate['SERVICES']) && is_array($candidate['SERVICES'])) {
-        $serviceGroups = $candidate['SERVICES'];
-    } elseif (isset($candidate['SERVICE']) && is_array($candidate['SERVICE'])) {
-        $serviceGroups = $candidate['SERVICE'];
-    } elseif (is_array($candidate)) {
-        $serviceGroups = $candidate;
+        return isset($item['SERVICEID']) || isset($item['serviceid']) || isset($item['ID']) || isset($item['id'])
+            || isset($item['SERVICENAME']) || isset($item['servicename']) || isset($item['SERVICE_NAME']) || isset($item['name']);
+    };
+
+    $extractList = function ($node) use (&$extractList, $looksLikeService) {
+        if (!is_array($node)) {
+            return [];
+        }
+
+        if (isset($node['LIST']) && is_array($node['LIST'])) {
+            return $node['LIST'];
+        }
+        if (isset($node['SERVICES']) && is_array($node['SERVICES'])) {
+            return $node['SERVICES'];
+        }
+        if (isset($node['SERVICE']) && is_array($node['SERVICE'])) {
+            return $node['SERVICE'];
+        }
+        if (isset($node['SUCCESS']) && is_array($node['SUCCESS'])) {
+            $nested = $extractList($node['SUCCESS']);
+            if (!empty($nested)) {
+                return $nested;
+            }
+        }
+
+        foreach ($node as $value) {
+            if (is_array($value)) {
+                if ($looksLikeService($value)) {
+                    return [$value];
+                }
+
+                $nested = $extractList($value);
+                if (!empty($nested)) {
+                    return $nested;
+                }
+            }
+        }
+
+        return [];
+    };
+
+    $serviceGroups = $extractList($response);
+    if (empty($serviceGroups)) {
+        $serviceGroups = $response;
     }
 
     if (!empty($serviceGroups) && is_array($serviceGroups)) {
         $firstItem = reset($serviceGroups);
-        if (is_array($firstItem) && (isset($firstItem['SERVICEID']) || isset($firstItem['serviceid']) || isset($firstItem['ID']) || isset($firstItem['id']))) {
-            $serviceGroups = ['Serviços' => ['SERVICES' => $serviceGroups]];
+        if (is_array($firstItem) && $looksLikeService($firstItem)) {
+            $serviceGroups = [['SERVICES' => $serviceGroups]];
         }
-    }
-
-    if (empty($serviceGroups)) {
-        echo '<!-- API DEBUG (' . htmlspecialchars($actionName, ENT_QUOTES, 'UTF-8') . '): ';
-        print_r($response);
-        echo ' -->';
     }
 
     return $serviceGroups;
 }
 
-$imeiServices = normalize_dhru_service_response($imei_services, 'imeiservicelist');
-$serverServices = normalize_dhru_service_response($server_services, 'serverloginservicelist');
-$remoteServices = normalize_dhru_service_response($remote_services, 'remoteservicelist');
+$imeiServices = $imei_groups;
+$serverServices = $server_groups;
+$remoteServices = $remote_groups;
 
 function build_service_map(array $groups, string $type)
 {
@@ -128,80 +200,162 @@ function build_service_map(array $groups, string $type)
     return $map;
 }
 
+function filter_groups_by_origin(array $groups, string $targetTab): array
+{
+    return array_values(array_filter($groups, function ($groupData) use ($targetTab) {
+        return is_array($groupData) && identify_service_target_tab($groupData) === $targetTab;
+    }));
+}
+
+function identify_service_target_tab($payload): string
+{
+    if (is_array($payload)) {
+        if (!empty($payload['ORIGEM_ABA']) && in_array($payload['ORIGEM_ABA'], ['imei', 'server', 'remote'], true)) {
+            return $payload['ORIGEM_ABA'];
+        }
+
+        if (!empty($payload['TYPE']) && in_array($payload['TYPE'], ['imei', 'server', 'remote'], true)) {
+            return $payload['TYPE'];
+        }
+
+        if (!empty($payload['TAB']) && in_array($payload['TAB'], ['imei', 'server', 'remote'], true)) {
+            return $payload['TAB'];
+        }
+
+        foreach ($payload as $item) {
+            if (is_array($item) && !empty($item['ORIGEM_ABA']) && in_array($item['ORIGEM_ABA'], ['imei', 'server', 'remote'], true)) {
+                return $item['ORIGEM_ABA'];
+            }
+        }
+
+        $segments = [];
+        foreach (['GROUP', 'NAME', 'SERVICENAME', 'SERVICE_NAME', 'CATEGORY', 'TITLE'] as $key) {
+            if (!empty($payload[$key]) && is_string($payload[$key])) {
+                $segments[] = $payload[$key];
+            }
+        }
+
+        if (!empty($payload['SERVICES']) && is_array($payload['SERVICES'])) {
+            foreach ($payload['SERVICES'] as $serviceItem) {
+                if (is_array($serviceItem)) {
+                    $segments[] = $serviceItem['SERVICENAME'] ?? $serviceItem['servicename'] ?? $serviceItem['SERVICE_NAME'] ?? $serviceItem['name'] ?? '';
+                }
+            }
+        }
+
+        $text = strtolower(implode(' ', array_filter($segments, fn($value) => is_string($value) && trim($value) !== '')));
+
+        if (preg_match('/\b(rent|rental|alug|aluguel|remote|remoto|teamviewer|anydesk|hours|minutes|hora|minuto|via usb)\b/', $text)) {
+            return 'remote';
+        }
+
+        if (preg_match('/\b(license|licenca|credit|credits|credito|creditos|activation|ativacao|tool|dongle|box|global|repair|renew|renovacao|account|usuario|user|login|year|month|days|server)\b/', $text)) {
+            return 'server';
+        }
+    }
+
+    return 'imei';
+}
+
+function format_brl($amount)
+{
+    return 'R$ ' . number_format((float) $amount, 2, ',', '.');
+}
+
 function render_service_cards(array $serviceGroups, string $section, string $serviceType)
 {
+    global $cotacao_dolar, $margem_lucro;
+
     if (empty($serviceGroups)) {
         echo '<div class="empty-state">Nenhum serviço disponível em ' . htmlspecialchars($section, ENT_QUOTES, 'UTF-8') . '.</div>';
         return;
     }
+
+    $hasServices = false;
 
     foreach ($serviceGroups as $groupName => $groupData) {
         if (!is_array($groupData)) {
             continue;
         }
 
-        $services = $groupData['SERVICES'] ?? $groupData['SERVICE'] ?? [];
-        if (!is_array($services) || empty($services)) {
+        $services = $groupData['SERVICES'] ?? $groupData['SERVICE'] ?? $groupData['services'] ?? $groupData['service'] ?? [];
+        if (empty($services) && is_array($groupData) && (isset($groupData['SERVICEID']) || isset($groupData['serviceid']) || isset($groupData['ID']) || isset($groupData['id']))) {
+            $services = [$groupData];
+        }
+
+        if (!is_array($services)) {
             continue;
         }
 
         $groupLabel = is_string($groupName) ? $groupName : 'Categoria';
-        echo '<div class="service-group">';
-        echo '<div class="service-group-title">' . htmlspecialchars($groupLabel, ENT_QUOTES, 'UTF-8') . '</div>';
-        echo '<div class="service-grid">';
-
+        $matchedServices = [];
         foreach ($services as $serviceItem) {
             if (!is_array($serviceItem)) {
                 continue;
             }
 
-            $serviceId = $serviceItem['SERVICEID'] ?? $serviceItem['serviceid'] ?? $serviceItem['ID'] ?? $serviceItem['id'] ?? '';
-            $serviceName = $serviceItem['SERVICENAME'] ?? $serviceItem['servicename'] ?? $serviceItem['SERVICE_NAME'] ?? $serviceItem['name'] ?? 'Serviço';
-            $credit = $serviceItem['CREDIT'] ?? $serviceItem['credit'] ?? $serviceItem['PRICE'] ?? $serviceItem['price'] ?? '0.00';
-            $tat = $serviceItem['TAT'] ?? $serviceItem['tat'] ?? $serviceItem['TIME'] ?? $serviceItem['time'] ?? '1-10 Minutes';
-            $short = $serviceItem['SHORTNAME'] ?? $serviceItem['shortname'] ?? $serviceItem['GROUP'] ?? '';
-            $logo = $serviceItem['LOGO'] ?? $serviceItem['logo'] ?? '';
-
-            if ($serviceId === '' || $serviceName === '') {
-                continue;
-            }
-
-            $numericPrice = is_numeric(str_replace(',', '.', (string)$credit)) ? (float) str_replace(',', '.', (string)$credit) : null;
-            $priceLabel = $numericPrice !== null ? '$' . htmlspecialchars(number_format($numericPrice, 2, '.', ''), ENT_QUOTES, 'UTF-8') : htmlspecialchars($credit, ENT_QUOTES, 'UTF-8');
-            $timeLabel = htmlspecialchars($tat, ENT_QUOTES, 'UTF-8');
-            $serviceBadge = $short ? htmlspecialchars($short, ENT_QUOTES, 'UTF-8') : 'IMEI';
-
-            $dataAttrs = ' data-service-id="' . htmlspecialchars($serviceId, ENT_QUOTES, 'UTF-8') . '"'
-                . ' data-service-type="' . htmlspecialchars($serviceType, ENT_QUOTES, 'UTF-8') . '"'
-                . ' data-service-name="' . htmlspecialchars($serviceName, ENT_QUOTES, 'UTF-8') . '"'
-                . ' data-service-credit="' . htmlspecialchars($priceLabel, ENT_QUOTES, 'UTF-8') . '"';
-            if ($numericPrice !== null) {
-                $dataAttrs .= ' data-service-price="' . htmlspecialchars(number_format($numericPrice, 2, '.', ''), ENT_QUOTES, 'UTF-8') . '"';
-            }
-            // optional minimum quantity/credits metadata
-            $minQty = $serviceItem['MIN'] ?? $serviceItem['MINQ'] ?? $serviceItem['MINIMUM'] ?? $serviceItem['minimum'] ?? null;
-            if ($minQty !== null && is_numeric($minQty)) {
-                $dataAttrs .= ' data-min-qty="' . htmlspecialchars((int)$minQty, ENT_QUOTES, 'UTF-8') . '"';
-            }
-
-            echo '<button type="button" class="service-card"' . $dataAttrs . '>';
-            echo '<div class="service-card-top"><span class="service-chip">' . $serviceBadge . '</span>';
-            if ($logo) {
-                echo '<span class="service-logo">' . htmlspecialchars($logo, ENT_QUOTES, 'UTF-8') . '</span>';
-            }
-            echo '</div>';
-            echo '<div class="service-card-body">';
-            echo '<h3>' . htmlspecialchars($serviceName, ENT_QUOTES, 'UTF-8') . '</h3>';
-            echo '<div class="service-meta">';
-            echo '<span class="service-price">' . $priceLabel . '</span>';
-            echo '<span class="service-time">' . $timeLabel . '</span>';
-            echo '</div>';
-            echo '</div>';
-            echo '</button>';
+            $matchedServices[] = $serviceItem;
         }
 
-        echo '</div>';
-        echo '</div>';
+        if (!empty($matchedServices)) {
+            $hasServices = true;
+            echo '<div class="service-group">';
+            echo '<div class="service-group-title">' . htmlspecialchars($groupLabel, ENT_QUOTES, 'UTF-8') . '</div>';
+            echo '<div class="service-grid">';
+
+            foreach ($matchedServices as $serviceItem) {
+                $serviceId = $serviceItem['SERVICEID'] ?? $serviceItem['serviceid'] ?? $serviceItem['ID'] ?? $serviceItem['id'] ?? '';
+                $serviceName = $serviceItem['SERVICENAME'] ?? $serviceItem['servicename'] ?? $serviceItem['SERVICE_NAME'] ?? $serviceItem['name'] ?? 'Serviço';
+                $credit = $serviceItem['CREDIT'] ?? $serviceItem['credit'] ?? $serviceItem['PRICE'] ?? $serviceItem['price'] ?? '0.00';
+                $tat = $serviceItem['TAT'] ?? $serviceItem['tat'] ?? $serviceItem['TIME'] ?? $serviceItem['time'] ?? '1-10 Minutes';
+                $short = $serviceItem['SHORTNAME'] ?? $serviceItem['shortname'] ?? $serviceItem['GROUP'] ?? '';
+                $logo = $serviceItem['LOGO'] ?? $serviceItem['logo'] ?? '';
+
+                if ($serviceId === '' || $serviceName === '') {
+                    continue;
+                }
+
+                $numericPrice = is_numeric(str_replace(',', '.', (string)$credit)) ? (float) str_replace(',', '.', (string)$credit) : null;
+                $priceInReal = $numericPrice !== null ? (($numericPrice * $cotacao_dolar) * $margem_lucro) : 0.00;
+                $priceLabel = $numericPrice !== null ? format_brl($priceInReal) : htmlspecialchars($credit, ENT_QUOTES, 'UTF-8');
+                $timeLabel = htmlspecialchars($tat, ENT_QUOTES, 'UTF-8');
+                $serviceBadge = $short ? htmlspecialchars($short, ENT_QUOTES, 'UTF-8') : 'IMEI';
+
+                $dataAttrs = ' data-service-id="' . htmlspecialchars($serviceId, ENT_QUOTES, 'UTF-8') . '"'
+                    . ' data-service-type="' . htmlspecialchars($serviceType, ENT_QUOTES, 'UTF-8') . '"'
+                    . ' data-service-name="' . htmlspecialchars($serviceName, ENT_QUOTES, 'UTF-8') . '"'
+                    . ' data-service-credit="' . htmlspecialchars($priceLabel, ENT_QUOTES, 'UTF-8') . '"';
+                if ($numericPrice !== null) {
+                    $dataAttrs .= ' data-service-price="' . htmlspecialchars(number_format($priceInReal, 2, '.', ''), ENT_QUOTES, 'UTF-8') . '"';
+                }
+                $minQty = $serviceItem['MIN'] ?? $serviceItem['MINQ'] ?? $serviceItem['MINIMUM'] ?? $serviceItem['minimum'] ?? $serviceItem['MINQTY'] ?? $serviceItem['minqty'] ?? null;
+                if ($minQty !== null && is_numeric($minQty)) {
+                    $dataAttrs .= ' data-min-qty="' . htmlspecialchars((int)$minQty, ENT_QUOTES, 'UTF-8') . '"';
+                }
+
+                echo '<button type="button" class="service-card"' . $dataAttrs . '>';
+                echo '<div class="service-card-top"><span class="service-chip">' . $serviceBadge . '</span>';
+                if ($logo) {
+                    echo '<span class="service-logo">' . htmlspecialchars($logo, ENT_QUOTES, 'UTF-8') . '</span>';
+                }
+                echo '</div>';
+                echo '<div class="service-card-body">';
+                echo '<h3>' . htmlspecialchars($serviceName, ENT_QUOTES, 'UTF-8') . '</h3>';
+                echo '<div class="service-meta">';
+                echo '<span class="service-price">' . $priceLabel . '</span>';
+                echo '<span class="service-time">' . $timeLabel . '</span>';
+                echo '</div>';
+                echo '</div>';
+                echo '</button>';
+            }
+
+            echo '</div>';
+            echo '</div>';
+        }
+    }
+
+    if (!$hasServices) {
+        echo '<div class="empty-state">Nenhum serviço mapeado para esta aba.</div>';
     }
 }
 
@@ -709,19 +863,24 @@ function resolve_order_type($serviceId, array $map)
         </div>
     </div>
 </nav>
-<div class="user-dropdown" id="userDropdown">
-    <h3>Conta</h3>
-    <a href="profile.php">Meu perfil</a>
-    <button type="button">+ Adicionar Fundo (PIX)</button>
-    <span class="badge-surface">PIX: 000.000.000-00</span>
-    <button type="button">Meu e-mail: <?php echo htmlspecialchars($userEmail, ENT_QUOTES, 'UTF-8'); ?></button>
-    <a href="logout.php" class="text-danger">Sair</a>
-    <div class="security-box">
-        <small>Último login</small>
-        <strong><?php echo htmlspecialchars($lastLoginTime, ENT_QUOTES, 'UTF-8'); ?></strong>
-        <div><?php echo htmlspecialchars($lastLoginIp, ENT_QUOTES, 'UTF-8'); ?></div>
-    </div>
-</div>
+<ul id="userDropdown" class="dropdown-menu dropdown-menu-end dropdown-menu-dark shadow-lg" aria-labelledby="userMenuToggle">
+    <li><a class="dropdown-item" href="perfil.php">Meu perfil</a></li>
+    <li><a class="dropdown-item" href="adicionar_fundo.php">+ Adicionar Fundo</a></li>
+    <li><a class="dropdown-item" href="api_acesso.php">API Acesso</a></li>
+    <li><a class="dropdown-item" href="faturas.php">Minha fatura</a></li>
+    <li><a class="dropdown-item" href="email_info.php">Meu e-mail</a></li>
+    <li><a class="dropdown-item" href="afirmacao.php">Meu Afirmação</a></li>
+    <li><a class="dropdown-item" href="transferir.php">Transferência de Créditos</a></li>
+    <li><a class="dropdown-item" href="preferencias.php">Email Preferência</a></li>
+    <li><a class="dropdown-item" href="status_servicos.php">Serviço Estado</a></li>
+    <li><a class="dropdown-item" href="instalar_app.php">Instalar App De Ligação</a></li>
+    <li><hr class="dropdown-divider border-secondary"></li>
+    <li class="px-3 small text-muted"><strong>Último Login</strong></li>
+    <li class="px-3 small text-muted font-monospace"><?= htmlspecialchars($lastLoginTime) ?></li>
+    <li class="px-3 small text-muted font-monospace text-wrap">IP: <?= htmlspecialchars($lastLoginIp) ?></li>
+    <li><hr class="dropdown-divider border-secondary"></li>
+    <li><a class="dropdown-item text-danger fw-bold" href="logout.php">Sair</a></li>
+</ul>
 <div class="customizer-panel" id="customizerPanel">
     <h3>Customização</h3>
     <div class="block">
@@ -757,13 +916,13 @@ function resolve_order_type($serviceId, array $map)
             <button class="<?php echo $activeTab === 'remote' ? 'active' : ''; ?>" data-tab="tab-remote">Remote Service</button>
         </div>
         <div id="tab-imei" class="tab-panel" style="display: <?php echo $activeTab === 'imei' ? 'block' : 'none'; ?>;">
-            <?php render_service_cards($imeiServices, 'IMEI Service', 'imei'); ?>
+            <?php render_service_cards(filter_groups_by_origin($allGroups, 'imei'), 'IMEI Service', 'imei'); ?>
         </div>
         <div id="tab-server" class="tab-panel" style="display: <?php echo $activeTab === 'server' ? 'block' : 'none'; ?>;">
-            <?php render_service_cards($serverServices, 'Server Services', 'server'); ?>
+            <?php render_service_cards(filter_groups_by_origin($allGroups, 'server'), 'Server Services', 'server'); ?>
         </div>
         <div id="tab-remote" class="tab-panel" style="display: <?php echo $activeTab === 'remote' ? 'block' : 'none'; ?>;">
-            <?php render_service_cards($remoteServices, 'Remote Service', 'remote'); ?>
+            <?php render_service_cards(filter_groups_by_origin($allGroups, 'remote'), 'Remote Service', 'remote'); ?>
         </div>
         <div class="selected-service-banner" id="selectedServiceBanner" style="display:none;">
             <div>
@@ -775,14 +934,17 @@ function resolve_order_type($serviceId, array $map)
         <form id="orderForm" class="order-actions">
             <input type="hidden" name="serviceId" id="serviceId" value="">
             <input type="hidden" name="orderType" id="orderType" value="imei">
-            <div id="imeiGroup">
-                <input type="text" name="imei" id="imeiInput" class="form-control" placeholder="Digite o IMEI" required>
-            </div>
-            <div id="accountGroup" style="display:none;">
-                <input type="text" name="account" id="accountInput" class="form-control" placeholder="Nome de Usuário / E-mail da Conta" />
-            </div>
-            <div id="remoteGroup" style="display:none;">
-                <input type="text" name="remoteInfo" id="remoteInput" class="form-control" placeholder="Informações gerais de contato" />
+            <div id="inputGroup" class="d-flex flex-column gap-2">
+                <label id="inputLabel" class="form-label mb-0 text-muted">Digite o IMEI do Aparelho</label>
+                <div id="imeiGroup">
+                    <input type="text" name="imei" id="imeiInput" class="form-control" placeholder="Digite o IMEI" required>
+                </div>
+                <div id="accountGroup" style="display:none;">
+                    <input type="text" name="account" id="accountInput" class="form-control" placeholder="Nome de Usuário / E-mail da Conta" />
+                </div>
+                <div id="remoteGroup" style="display:none;">
+                    <input type="text" name="remoteInfo" id="remoteInput" class="form-control" placeholder="Informações gerais de contato" />
+                </div>
             </div>
             <input type="text" name="reference" id="referenceInput" class="form-control" placeholder="Referência opcional">
             <div id="quantityGroup" style="display:none; min-width:220px;">
@@ -888,8 +1050,23 @@ function resolve_order_type($serviceId, array $map)
     const orderForm = document.getElementById('orderForm');
     const orderFeedback = document.getElementById('orderFeedback');
     const orderTableBody = document.getElementById('orderTableBody');
+    const inputLabel = document.getElementById('inputLabel');
+    const inputGroup = document.getElementById('inputGroup');
+    const referenceInput = document.getElementById('referenceInput');
+    const quantityGroup = document.getElementById('quantityGroup');
+    const quantityInput = document.getElementById('quantityInput');
+    const depositInfo = document.getElementById('depositInfo');
+    const submitButton = orderForm.querySelector('button[type="submit"]');
     let currentHistoryFilter = '<?php echo $activeHistory; ?>';
     let currentTab = '<?php echo $activeTab; ?>';
+    let currentMinQty = 1;
+
+    function formatBrl(value) {
+        return 'R$ ' + Number(value || 0).toLocaleString('pt-BR', {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2
+        });
+    }
 
     function buildHistoryQuery() {
         return '?tab=' + currentTab + '&history=' + currentHistoryFilter;
@@ -964,18 +1141,22 @@ function resolve_order_type($serviceId, array $map)
 
     userMenuToggle.addEventListener('click', (event) => {
         event.stopPropagation();
-        userDropdown.classList.toggle('show');
+        if (userDropdown) {
+            userDropdown.classList.toggle('show');
+        }
         customizerPanel.classList.remove('show');
     });
 
     settingsToggle.addEventListener('click', (event) => {
         event.stopPropagation();
         customizerPanel.classList.toggle('show');
-        userDropdown.classList.remove('show');
+        if (userDropdown) {
+            userDropdown.classList.remove('show');
+        }
     });
 
     document.addEventListener('click', (event) => {
-        if (!userDropdown.contains(event.target) && event.target !== userMenuToggle) {
+        if (userDropdown && !userDropdown.contains(event.target) && event.target !== userMenuToggle) {
             userDropdown.classList.remove('show');
         }
         if (!customizerPanel.contains(event.target) && event.target !== settingsToggle) {
@@ -1010,32 +1191,66 @@ function resolve_order_type($serviceId, array $map)
         });
     });
 
-    function setOrderMode(type) {
+    function setOrderMode(type, serviceName = '') {
         orderTypeInput.value = type;
-        if (type === 'server') {
-            imeiGroup.style.display = 'none';
-            imeiInput.required = false;
-            accountGroup.style.display = 'block';
-            accountInput.required = true;
-            accountInput.placeholder = 'Nome de Usuário / E-mail da Conta';
-            remoteGroup.style.display = 'none';
-            remoteInput.required = false;
+        const serviceText = String(serviceName || '').toLowerCase();
+        const isBypassLike = /(bypass|iremoval|removal|hfz|lpro|apple)/i.test(serviceText);
+        const isCreditPack = /(credit|credits|pack)/i.test(serviceText);
+        const isFixedLicense = /(license|licenca|unlocktool|dft|pro|meses|ano|year)/i.test(serviceText);
+        const isRemoteRental = /(alug|aluguel|rental|remote|teamviewer|anydesk|hora|hour)/i.test(serviceText);
+
+        inputLabel.textContent = type === 'imei'
+            ? (isBypassLike ? 'Número de Série (Serial Number)' : 'Digite o IMEI do Aparelho')
+            : type === 'server'
+                ? (isCreditPack ? 'Username (Nome de Usuário da Ferramenta)' : 'E-mail de Registro / Nome de Usuário')
+                : 'Pagamento do Aluguel por Hora';
+
+        imeiGroup.style.display = type === 'imei' ? 'block' : 'none';
+        imeiInput.required = type === 'imei';
+        accountGroup.style.display = type === 'server' ? 'block' : 'none';
+        accountInput.required = type === 'server';
+        remoteGroup.style.display = type === 'remote' ? 'block' : 'none';
+        remoteInput.required = type === 'remote';
+        referenceInput.style.display = type === 'remote' ? 'none' : 'block';
+        referenceInput.required = type !== 'remote';
+        inputGroup.style.display = type === 'remote' ? 'none' : 'block';
+        quantityGroup.style.display = (type === 'server' && isCreditPack) ? 'block' : 'none';
+        depositInfo.style.display = (type === 'server' && isCreditPack) ? 'block' : 'none';
+
+        if (type === 'imei') {
+            imeiInput.placeholder = isBypassLike
+                ? 'Número de Série (Serial Number)'
+                : 'Digite o IMEI do Aparelho';
+            quantityInput.value = 1;
+        } else if (type === 'server') {
+            accountInput.placeholder = isCreditPack ? 'Username (Nome de Usuário da Ferramenta)' : 'E-mail de Registro / Nome de Usuário';
+            if (isCreditPack) {
+                quantityInput.min = currentMinQty;
+                quantityInput.value = Math.max(currentMinQty, Number(quantityInput.value || currentMinQty));
+                depositInfo.textContent = 'Depósito estimado: ' + formatBrl(Number(quantityInput.value || currentMinQty));
+            } else {
+                quantityInput.value = 1;
+                depositInfo.textContent = '';
+            }
         } else if (type === 'remote') {
-            imeiGroup.style.display = 'none';
-            imeiInput.required = false;
-            accountGroup.style.display = 'none';
-            accountInput.required = false;
-            remoteGroup.style.display = 'block';
-            remoteInput.required = true;
-            remoteInput.placeholder = 'Informações gerais de contato';
-        } else {
-            imeiGroup.style.display = 'block';
-            imeiInput.required = true;
-            accountGroup.style.display = 'none';
-            accountInput.required = false;
-            remoteGroup.style.display = 'none';
-            remoteInput.required = false;
-            imeiInput.placeholder = 'Insira o IMEI de 15 dígitos';
+            imeiInput.value = '';
+            accountInput.value = '';
+            remoteInput.value = '';
+            quantityInput.value = 1;
+            referenceInput.value = '';
+            depositInfo.textContent = '';
+            submitButton.disabled = false;
+            submitButton.style.opacity = '1';
+        }
+
+        if (type === 'server' && isFixedLicense) {
+            quantityGroup.style.display = 'none';
+            depositInfo.style.display = 'none';
+        }
+
+        if (type === 'server' && isRemoteRental) {
+            quantityGroup.style.display = 'none';
+            depositInfo.style.display = 'none';
         }
     }
 
@@ -1049,25 +1264,46 @@ function resolve_order_type($serviceId, array $map)
         serviceCards.forEach(item => item.classList.remove('selected'));
         card.classList.add('selected');
         const selectedType = card.dataset.serviceType || 'imei';
+        const selectedName = card.dataset.serviceName || '';
         serviceIdInput.value = card.dataset.serviceId || '';
         orderTypeInput.value = selectedType;
-        setOrderMode(selectedType);
-        selectedServiceName.textContent = (card.dataset.serviceName || '') + (card.dataset.serviceId ? ' (' + card.dataset.serviceId + ')' : '');
+        setOrderMode(selectedType, selectedName);
+        selectedServiceName.textContent = (selectedName || '') + (card.dataset.serviceId ? ' (' + card.dataset.serviceId + ')' : '');
         selectedServicePrice.textContent = card.dataset.serviceCredit || '';
         selectedServiceBanner.style.display = 'flex';
 
         const price = card.dataset.servicePrice ? parseFloat(card.dataset.servicePrice) : null;
         const minQty = card.dataset.minQty ? parseInt(card.dataset.minQty, 10) : 1;
+        currentMinQty = Math.max(1, minQty || 1);
         const qGroup = document.getElementById('quantityGroup');
-        const depositInfo = document.getElementById('depositInfo');
-        if (price !== null && !isNaN(price)) {
+        const hasServerCredit = selectedType === 'server' && /(credit|credits|pack)/i.test(selectedName);
+
+        if (selectedType === 'remote') {
+            qGroup.style.display = 'none';
+            depositInfo.style.display = 'none';
+            quantityInput.value = 1;
+            referenceInput.value = '';
+            submitButton.disabled = false;
+            submitButton.style.opacity = '1';
+            return;
+        }
+
+        if (price !== null && !isNaN(price) && hasServerCredit) {
             qGroup.style.display = 'block';
             depositInfo.style.display = 'block';
             const qInput = document.getElementById('quantityInput');
-            qInput.min = Math.max(1, minQty || 1);
-            if (parseInt(qInput.value, 10) < qInput.min) qInput.value = qInput.min;
-            updateDeposit(price, qInput.value);
-            qInput.oninput = function () { updateDeposit(price, this.value); };
+            qInput.min = currentMinQty;
+            qInput.value = Math.max(currentMinQty, Number(qInput.value || currentMinQty));
+            updateDeposit(price, qInput.value, currentMinQty);
+            qInput.oninput = function () {
+                const newQty = Math.max(currentMinQty, parseInt(this.value, 10) || currentMinQty);
+                this.value = newQty;
+                updateDeposit(price, this.value, currentMinQty);
+            };
+        } else if (price !== null && !isNaN(price)) {
+            qGroup.style.display = 'none';
+            depositInfo.style.display = 'none';
+            quantityInput.value = 1;
         } else {
             qGroup.style.display = 'none';
             depositInfo.style.display = 'none';
@@ -1078,14 +1314,20 @@ function resolve_order_type($serviceId, array $map)
         card.addEventListener('click', () => selectServiceCard(card));
     });
 
-    function updateDeposit(unitPrice, quantity) {
-        const depositInfo = document.getElementById('depositInfo');
-        const qty = parseInt(quantity, 10) || 0;
+    function updateDeposit(unitPrice, quantity, minAllowed = currentMinQty) {
+        const qty = Math.max(1, parseInt(quantity, 10) || 1);
         const total = (parseFloat(unitPrice) * qty) || 0;
-        depositInfo.textContent = 'Depósito necessário: $' + total.toFixed(2) + (qty === 0 ? ' (Quantidade inválida)' : '');
+        if (qty < minAllowed) {
+            submitButton.disabled = true;
+            submitButton.style.opacity = '.55';
+            depositInfo.textContent = 'Quantidade mínima permitida: ' + minAllowed + ' crédito(s).';
+            return;
+        }
+        submitButton.disabled = false;
+        submitButton.style.opacity = '1';
+        depositInfo.textContent = 'Depósito necessário: ' + formatBrl(total);
     }
 
-    // Search/filter services by name, group, or badge
     const serviceSearch = document.getElementById('serviceSearch');
     const clearSearch = document.getElementById('clearSearch');
     serviceSearch.addEventListener('input', function () {
